@@ -106,6 +106,8 @@ private:
     OP_INC         = 0xF0,
     OP_DEC         = 0xF1,
     OP_SEMICOLON   = 0xF2,
+    // comma
+    OP_COMMA       = 0xF3,
   };
 
   enum TokenRole {
@@ -136,6 +138,7 @@ private:
   void parse_expression(size_t parent, bool toplevel);
   void parse_statements(size_t parent);
   void match_brackets();
+  void dump_token(size_t, Token*);
 public:
   std::filesystem::path filename;
   UnitStatus status = UNIT_NULL;

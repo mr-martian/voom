@@ -32,7 +32,7 @@ CompilationUnit::~CompilationUnit() {
 
 void CompilationUnit::report_error(size_t token_index, const char* msg) {
   std::cerr << filename << " line " << tokens[token_index]->line_number << ": ";
-  std::cerr << msg << std::endl;
+  std::cerr << msg << " (token " << token_index << ")" << std::endl;
   errors = true;
 }
 
@@ -493,26 +493,28 @@ void CompilationUnit::tokenize() {
   }
 }
 
-void CompilationUnit::dumpTokens() {
-  for (size_t i = 0; i < tokens.size(); i++) {
-    auto tok = tokens[i];
-    std::cout << i << " > " << tok->parent;
-    std::cout << " line " << tok->line_number << " type ";
-    switch (tok->type) {
-    case TOKEN_STR: std::cout << "str "; break;
-    case TOKEN_IDENT: std::cout << "ident "; break;
-    case TOKEN_NUM: std::cout << "num "; break;
-    case TOKEN_OP: std::cout << "op "; break;
-    case TOKEN_BRACKET: std::cout << "bracket "; break;
-    case TOKEN_SEMICOLON: std::cout << "semicolon "; break;
-    case TOKEN_COMMA: std::cout << "comma "; break;
-    case TOKEN_FUNCTION: std::cout << "function "; break;
-    case TOKEN_WHILE: std::cout << "while "; break;
-    default:
-      std::cout << "WAAAT? (" << tok->type << ") ";
-    }
-    std::cout << tok->text << std::endl;
+void CompilationUnit::dump_token(size_t i, Token* tok) {
+  std::cerr << i << " > " << tok->parent;
+  std::cerr << " line " << tok->line_number << " type ";
+  switch (tok->type) {
+  case TOKEN_STR: std::cerr << "str "; break;
+  case TOKEN_IDENT: std::cerr << "ident "; break;
+  case TOKEN_NUM: std::cerr << "num "; break;
+  case TOKEN_OP: std::cerr << "op "; break;
+  case TOKEN_BRACKET: std::cerr << "bracket "; break;
+  case TOKEN_SEMICOLON: std::cerr << "semicolon "; break;
+  case TOKEN_COMMA: std::cerr << "comma "; break;
+  case TOKEN_FUNCTION: std::cerr << "function "; break;
+  case TOKEN_WHILE: std::cerr << "while "; break;
+  default:
+    std::cerr << "WAAAT? (" << tok->type << ") ";
   }
+  std::cerr << tok->text << " p " << tok->parent;
+  std::cerr << " c1 " << tok->child1 << " c2 " << tok->child2 << std::endl;
+}
+
+void CompilationUnit::dumpTokens() {
+  for (size_t i = 0; i < tokens.size(); i++) dump_token(i, tokens[i]);
 }
 
 void CompilationUnit::match_brackets() {
@@ -547,6 +549,8 @@ void CompilationUnit::match_brackets() {
 }
 
 void CompilationUnit::parse_expression(size_t start, bool toplevel) {
+  if (tokens[start]->child2 == start+1) return;
+  tokens[start]->child1 = start+1;
   size_t cur = 0;
   for (size_t i = start+1; i < tokens[start]->child2; i++) {
     auto tok = tokens[i];
@@ -560,6 +564,7 @@ void CompilationUnit::parse_expression(size_t start, bool toplevel) {
       else if (tokens[cur]->role == ROLE_OPERATOR && !tokens[cur]->child2) {
         tokens[cur]->child2 = i;
         tok->parent = cur;
+        cur = i;
       }
       else report_error(i, "missing operator");
       break;
@@ -591,18 +596,26 @@ void CompilationUnit::parse_expression(size_t start, bool toplevel) {
           if (tokens[parent]->child2 == p) tokens[parent]->child2 = i;
         }
       }
+      cur = i;
       i = tok->child2;
       break;
     case TOKEN_COMMA:
+      tok->op = OP_COMMA;
     case TOKEN_OP:
       tok->role = ROLE_OPERATOR;
       if (!cur) report_error(i, "missing left operand"); // TODO: unary
+      else if (tokens[cur]->role == ROLE_OPERATOR) report_error(i, "unexpected operator");
       else if (tokens[cur]->role == ROLE_OPERAND) {
+        while (tokens[tokens[cur]->parent]->role == ROLE_OPERATOR &&
+               (tokens[tokens[cur]->parent]->op >> 4) <= (tok->op >> 4)) {
+          cur = tokens[cur]->parent;
+        }
+        tok->parent = tokens[cur]->parent;
+        if (tok->parent == start) tokens[start]->child1 = i;
+        else tokens[tok->parent]->child2 = i;
         tok->child1 = cur;
         tokens[cur]->parent = i;
         cur = i;
-      } else if (tokens[cur]->role == ROLE_OPERATOR) {
-        // TODO
       }
       break;
     case TOKEN_STATEMENT_OP:
@@ -614,13 +627,12 @@ void CompilationUnit::parse_expression(size_t start, bool toplevel) {
   }
 }
 
-
-
 void CompilationUnit::parse_statements(size_t start) {
   size_t cur = 0;
   size_t statement_start = 0;
   for (size_t i = start+1; i < tokens[start]->child2; i++) {
     auto tok = tokens[i];
+    if (tok->parent != start) continue;
     switch (tok->type) {
     case TOKEN_BRACKET:
       if (tok->op == OP_BRACE) parse_statements(i);
