@@ -14,6 +14,7 @@ int Compiler::compile() {
     if (cu->errors) {
       std::cout << "HAS ERRORS" << std::endl;
     }
+    cu->parse();
     cu->dumpTokens();
   }
   return 0;
