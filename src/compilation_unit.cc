@@ -57,6 +57,7 @@ enum TokenizerState {
   t->line_number = start_line_number; \
   t->byte_number = start_index;       \
   t->type = (typ);                    \
+  t->end = tokens.size();             \
   tokens.push_back(t);                \
   state = STATE_NULL;                 \
 }
@@ -225,6 +226,7 @@ void CompilationUnit::check_keyword() {
     tok2->line_number = tok->line_number;          \
     tok2->byte_number = tok->byte_number + (idx);  \
     tok2->type = TOKEN_OP;                         \
+    tok2->end = tokens.size();                     \
     tokens.push_back(tok2);                        \
     check_operator();                              \
     return;                                        \
@@ -251,7 +253,10 @@ void CompilationUnit::check_operator() {
     if (len > 1 && buf[1] == '=') {
       tok->op = OP_NEQ;
       SPLIT_TOKEN(2);
-    } else SPLIT_TOKEN(1);
+    } else {
+      tok->op = OP_UNARY_NOT;
+      SPLIT_TOKEN(1);
+    }
     break;
   case '%':
     tok->op = OP_MOD;
@@ -367,6 +372,9 @@ void CompilationUnit::check_operator() {
       if (buf[1] == '|') {
         tok->op = OP_OR;
         MAYBE_ASSIGN(2);
+      } else if (buf[1] == '>') {
+        tok->op = OP_PIPE;
+        SPLIT_TOKEN(2);
       } else {
         MAYBE_ASSIGN(1);
       }
@@ -510,16 +518,27 @@ void CompilationUnit::dump_token(size_t i, Token* tok) {
     std::cerr << "WAAAT? (" << tok->type << ") ";
   }
   std::cerr << tok->text << " p " << tok->parent;
-  std::cerr << " c1 " << tok->child1 << " c2 " << tok->child2 << std::endl;
+  std::cerr << " c1 " << tok->child1 << " c2 " << tok->child2 << " n " << tok->next << " e " << tok->end << " r " << tok->role << std::endl;
 }
 
 void CompilationUnit::dumpTokens() {
-  for (size_t i = 0; i < tokens.size(); i++) dump_token(i, tokens[i]);
+  for (size_t i = 0; i < tokens.size(); i++) {
+    size_t j = tokens[i]->parent;
+    while (j != 0) {
+      std::cerr << "  ";
+      if (j == tokens[j]->parent) break;
+      j = tokens[j]->parent;
+    }
+    if (tokens[i]->parent < i) std::cerr << "\\ ";
+    else if (tokens[i]->parent > i) std::cerr << "/ ";
+    dump_token(i, tokens[i]);
+  }
 }
 
 void CompilationUnit::match_brackets() {
   std::vector<size_t> stack;
   for (size_t i = 0; i < tokens.size(); i++) {
+    if (!stack.empty()) tokens[i]->parent = stack.back();
     if (tokens[i]->type != TOKEN_BRACKET) continue;
     auto b = tokens[i]->text;
     if (b == "{") {
@@ -535,24 +554,53 @@ void CompilationUnit::match_brackets() {
                ((tokens[stack.back()]->op == OP_BRACE && b == "}") ||
                 (tokens[stack.back()]->op == OP_PAREN && b == ")") ||
                 (tokens[stack.back()]->op == OP_BRACKET && b == "]"))) {
-      for (size_t j = stack.back()+1; j <= i; j++) {
-        if (!tokens[j]->parent) tokens[j]->parent = stack.back();
-      }
-      tokens[stack.back()]->child2 = i;
+      tokens[stack.back()]->end = i;
       stack.pop_back();
     } else {
       report_error(i, "mismatched bracket");
     }
   }
   for (auto& it : stack) report_error(it, "unclosed bracket");
-  tokens[0]->child2 = tokens.size()-1;
+  tokens[0]->end = tokens.size()-1;
 }
 
-void CompilationUnit::parse_expression(size_t start, bool toplevel) {
-  if (tokens[start]->child2 == start+1) return;
-  tokens[start]->child1 = start+1;
+void CompilationUnit::set_child1(size_t parent, size_t child) {
+  tokens[parent]->child1 = child;
+  tokens[child]->parent = parent;
+  if (tokens[child]->end > tokens[parent]->end) {
+    tokens[parent]->end = tokens[child]->end;
+  }
+}
+
+void CompilationUnit::set_child2(size_t parent, size_t child) {
+  tokens[parent]->child2 = child;
+  tokens[child]->parent = parent;
+  if (tokens[child]->end > tokens[parent]->end) {
+    tokens[parent]->end = tokens[child]->end;
+  }
+}
+
+void CompilationUnit::parse_expression(size_t start, bool toplevel, bool semicolon) {
+  if (!semicolon && tokens[start]->end == start+1) return;
+  size_t lim1 = start+1;
+  size_t lim2 = tokens[start]->end;
+  if (semicolon) {
+    lim1 = start;
+    for (; lim2 < tokens.size(); lim2++) {
+      if (tokens[lim2]->parent != tokens[start]->parent) continue;
+      if (tokens[lim2]->type == TOKEN_SEMICOLON) {
+        set_child1(lim2, start);
+      }
+    }
+    if (tokens[start]->parent <= start) {
+      report_error(start, "missing semicolon after expression");
+      return;
+    }
+  } else {
+    tokens[start]->child1 = start+1;
+  }
   size_t cur = 0;
-  for (size_t i = start+1; i < tokens[start]->child2; i++) {
+  for (size_t i = lim1; i < lim2; i++) {
     auto tok = tokens[i];
     switch (tok->type) {
     case TOKEN_CONSTANT:
@@ -562,11 +610,13 @@ void CompilationUnit::parse_expression(size_t start, bool toplevel) {
       tok->role = ROLE_OPERAND;
       if (!cur) cur = i;
       else if (tokens[cur]->role == ROLE_OPERATOR && !tokens[cur]->child2) {
-        tokens[cur]->child2 = i;
-        tok->parent = cur;
+        set_child2(cur, i);
         cur = i;
       }
-      else report_error(i, "missing operator");
+      else {
+        report_error(i, "missing operator");
+        return;
+      }
       break;
     case TOKEN_BRACKET:
       tok->role = ROLE_OPERAND;
@@ -574,14 +624,14 @@ void CompilationUnit::parse_expression(size_t start, bool toplevel) {
         parse_statements(i);
         if (!cur) cur = i;
         else if (tokens[cur]->type == TOKEN_OP && !tokens[cur]->child2) {
-          tokens[cur]->child2 = i;
+          set_child2(cur, i);
         }
         else report_error(i, "missing operator");
       } else {
         parse_expression(i, false);
         if (!cur) cur = i;
         else if (tokens[cur]->role == ROLE_OPERATOR && !tokens[cur]->child2) {
-          tokens[cur]->child2 = i;
+          set_child2(cur, i);
         } else {
           size_t p = cur;
           for (; tokens[p]->type == TOKEN_OP; p = tokens[p]->child2);
@@ -597,17 +647,21 @@ void CompilationUnit::parse_expression(size_t start, bool toplevel) {
         }
       }
       cur = i;
-      i = tok->child2;
+      i = tok->end;
       break;
     case TOKEN_COMMA:
       tok->op = OP_COMMA;
     case TOKEN_OP:
+    case TOKEN_STATEMENT_OP:
+      if (tok->type == TOKEN_STATEMENT_OP && !toplevel) {
+        report_error(i, "unexpected assignment in expression");
+      }
       tok->role = ROLE_OPERATOR;
       if (!cur) report_error(i, "missing left operand"); // TODO: unary
       else if (tokens[cur]->role == ROLE_OPERATOR) report_error(i, "unexpected operator");
       else if (tokens[cur]->role == ROLE_OPERAND) {
         while (tokens[tokens[cur]->parent]->role == ROLE_OPERATOR &&
-               (tokens[tokens[cur]->parent]->op >> 4) <= (tok->op >> 4)) {
+               op_compare(tokens[tokens[cur]->parent]) <= op_compare(tok)) {
           cur = tokens[cur]->parent;
         }
         tok->parent = tokens[cur]->parent;
@@ -618,8 +672,17 @@ void CompilationUnit::parse_expression(size_t start, bool toplevel) {
         cur = i;
       }
       break;
-    case TOKEN_STATEMENT_OP:
-      if (!toplevel) report_error(i, "unexpected assignment in expression");
+    case TOKEN_SEMICOLON:
+      if (!toplevel) report_error(i, "unexpected semicolon in expression");
+      if (tokens[cur]->role == ROLE_OPERATOR) {
+        report_error(i, "missing right operand");
+      } else if (tokens[cur]->role == ROLE_OPERAND) {
+        while (tokens[tokens[cur]->parent]->role == ROLE_OPERATOR) {
+          cur = tokens[cur]->parent;
+        }
+        set_child1(i, cur);
+      }
+      return;
       break;
     default:
       report_error(i, "unexpected token");
@@ -627,29 +690,54 @@ void CompilationUnit::parse_expression(size_t start, bool toplevel) {
   }
 }
 
+#define APPEND_STATEMENT() {          \
+  if (last_statement) {               \
+    tokens[last_statement]->next = i; \
+  }                                   \
+  last_statement = i;                 \
+}
+
+
 void CompilationUnit::parse_statements(size_t start) {
-  size_t cur = 0;
+  size_t last_statement = 0;
   size_t statement_start = 0;
-  for (size_t i = start+1; i < tokens[start]->child2; i++) {
+  for (size_t i = start+1; i < tokens[start]->end; i++) {
     auto tok = tokens[i];
+    auto tok_index = i;
     if (tok->parent != start) continue;
     switch (tok->type) {
     case TOKEN_BRACKET:
       if (tok->op == OP_BRACE) parse_statements(i);
       else parse_expression(i, true);
-      i = tok->child2;
+      i = tok->end;
       break;
     case TOKEN_BREAK:
     case TOKEN_CONTINUE:
-      // (identifier) semicolon
+      APPEND_STATEMENT();
+      i++;
+      if (tokens[i]->type == TOKEN_IDENT) {
+        set_child1(tok_index, i);
+        i++;
+      }
+      if (tokens[i]->type != TOKEN_SEMICOLON) {
+        if (tok->type == TOKEN_BREAK) {
+          report_error(i, "expected semicolon after break");
+        } else {
+          report_error(i, "expected semicolon after continue");
+        }
+      }
+      set_child2(tok_index, i);
       break;
     case TOKEN_CASE:
       break;
     case TOKEN_CLASS:
+      APPEND_STATEMENT();
       break;
     case TOKEN_DELETE:
+      APPEND_STATEMENT();
       break;
     case TOKEN_DO:
+      APPEND_STATEMENT();
       break;
     case TOKEN_ELIF:
       break;
@@ -657,30 +745,72 @@ void CompilationUnit::parse_statements(size_t start) {
       break;
     case TOKEN_ENUM:
     case TOKEN_STRUCT:
+      APPEND_STATEMENT();
       // identifier block
       break;
     case TOKEN_FUNCTION:
+      APPEND_STATEMENT();
+      {
+        i++;
+        if (tokens[i]->type != TOKEN_IDENT) {
+          report_error(i, "expected function name");
+        }
+        set_child1(tok_index, i);
+        size_t cur = i;
+        i++;
+        if (tokens[i]->type != TOKEN_BRACKET || tokens[i]->op != OP_PAREN) {
+          report_error(i, "expected argument list");
+        }
+        tokens[cur]->next = i;
+        cur = i;
+        tokens[i]->parent = tok_index;
+        i = tokens[i]->end;
+        i++;
+        // TODO: modifiers, return type
+        if (tokens[i]->type != TOKEN_BRACKET || tokens[i]->op != OP_BRACE) {
+          report_error(i, "expected function body");
+        }
+        tokens[cur]->next = i;
+        parse_statements(i);
+        set_child2(tok_index, i);
+        i = tokens[i]->end;
+      }
       break;
     case TOKEN_IMPORT:
+      APPEND_STATEMENT();
       // str semicolon
       break;
     case TOKEN_SEMICOLON:
+      APPEND_STATEMENT();
       break;
     case TOKEN_FOR:
     case TOKEN_SWITCH:
     case TOKEN_WHILE:
+      APPEND_STATEMENT();
       // (identifier) expression block
       break;
     case TOKEN_WITH:
+      APPEND_STATEMENT();
       break;
     case TOKEN_DEFER:
+      APPEND_STATEMENT();
+      // statement semicolon
+      break;
     case TOKEN_RETURN:
     case TOKEN_YIELD:
+      APPEND_STATEMENT();
       // expression semicolon
       break;
     default:
-      // expression piece
-      ;
+      {
+        parse_expression(i, true, true);
+        while (tokens[i]->parent > i) i = tokens[i]->parent;
+        if (tokens[i]->type != TOKEN_SEMICOLON) {
+          report_error(i, "expected semicolon after expression");
+        }
+        APPEND_STATEMENT();
+      }
+      break;
     }
   }
 }

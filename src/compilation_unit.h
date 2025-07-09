@@ -125,20 +125,27 @@ private:
     size_t line_number = 0;
     size_t byte_number = 0;
     size_t parent = 0;
-    size_t child1 = 0;
-    size_t child2 = 0;
+    size_t child1 = 0; // main child
+    size_t child2 = 0; // secondary child
+    size_t end = 0;
+    size_t next = 0; // next in sequence
     TokenType type;
     Operator op;
     TokenRole role;
   };
+  int op_compare(Token* tok) {
+    return (tok->op >> 4) + (0x10 * (tok->type == TOKEN_STATEMENT_OP));
+  }
   std::vector<Token*> tokens;
   void report_error(size_t token_index, const char* msg);
   void check_keyword();
   void check_operator();
-  void parse_expression(size_t parent, bool toplevel);
+  void parse_expression(size_t parent, bool toplevel, bool semicolon=false);
   void parse_statements(size_t parent);
   void match_brackets();
   void dump_token(size_t, Token*);
+  void set_child1(size_t parent, size_t child);
+  void set_child2(size_t parent, size_t child);
 public:
   std::filesystem::path filename;
   UnitStatus status = UNIT_NULL;
